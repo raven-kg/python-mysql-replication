@@ -70,23 +70,31 @@ class Gtid(object):
     def parse(gtid):
         """Parse a GTID from mysql textual format.
 
+        Supports both legacy and tagged GTID formats:
+        - Legacy: UUID:interval[:interval...]
+        - Tagged: UUID:tag:interval[:interval...]
+
         Raises:
             - ValueError: if GTID format is incorrect.
         """
+        # Pattern for UUID (with or without tag)
+        # Tagged GTID format: UUID:tag:intervals or UUID:intervals
         m = re.search(
-            "^([0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12})"
+            r"^([0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12})"
+            r"(?::([a-zA-Z0-9_]{1,33}))?"  # Optional tag (up to 33 chars)
             "((?::[0-9-]+)+)$",
             gtid,
         )
         if not m:
             raise ValueError(f"GTID format is incorrect: {gtid!r}")
 
-        sid = m.group(1)
-        intervals = m.group(2)
+        sid = m.group(1)  # UUID
+        tag = m.group(2)  # Tag (optional, can be None)
+        intervals = m.group(3)  # Intervals
 
         intervals_parsed = [Gtid.parse_interval(x) for x in intervals.split(":")[1:]]
 
-        return sid, intervals_parsed
+        return sid, tag, intervals_parsed
 
     def __add_interval(self, itvl):
         """
@@ -157,11 +165,14 @@ class Gtid(object):
             any(contains(me, them) for me in self.intervals) for them in other.intervals
         )
 
-    def __init__(self, gtid, sid=None, intervals=[]):
+    def __init__(self, gtid, sid=None, intervals=[], tag=None):
+        self.tag = None
         if sid:
             intervals = intervals
+            self.tag = tag
         else:
-            sid, intervals = Gtid.parse(gtid)
+            sid, tag, intervals = Gtid.parse(gtid)
+            self.tag = tag
 
         self.sid = sid
         self.intervals = []
@@ -175,6 +186,9 @@ class Gtid(object):
            Exception: if the attempted merge has different SID"""
         if self.sid != other.sid:
             raise Exception(f"Attempt to merge different SID {self.sid} != {other.sid}")
+
+        if self.tag != other.tag:
+            raise Exception(f"Attempt to merge different tags {self.tag} != {other.tag}")
 
         result = deepcopy(self)
 
@@ -196,8 +210,12 @@ class Gtid(object):
         return result
 
     def __str__(self):
-        """We represent the human value here - a single number
-        for one transaction, or a closed interval (decrementing b)"""
+        """Format as human-readable GTID string.
+
+        Returns:
+            - Legacy format: UUID:interval
+            - Tagged format: UUID:tag:interval
+        """
 
         def format_interval(x):
             if x[0] + 1 != x[1]:
@@ -205,7 +223,10 @@ class Gtid(object):
             return str(x[0])
 
         interval_string = ":".join(map(format_interval, self.intervals))
-        return f"{self.sid}:{interval_string}"
+        if self.tag:
+            return f"{self.sid}:{self.tag}:{interval_string}"
+        else:
+            return f"{self.sid}:{interval_string}"
 
     def __repr__(self):
         return f'<Gtid "{self}">'
@@ -296,26 +317,36 @@ class Gtid(object):
     def __eq__(self, other):
         if other.sid != self.sid:
             return False
+        if self.tag != other.tag:
+            return False
         return self.intervals == other.intervals
 
     def __lt__(self, other):
         if other.sid != self.sid:
             return self.sid < other.sid
+        if self.tag != other.tag:
+            return (self.tag or "") < (other.tag or "")
         return self.intervals < other.intervals
 
     def __le__(self, other):
         if other.sid != self.sid:
             return self.sid <= other.sid
+        if self.tag != other.tag:
+            return (self.tag or "") <= (other.tag or "")
         return self.intervals <= other.intervals
 
     def __gt__(self, other):
         if other.sid != self.sid:
             return self.sid > other.sid
+        if self.tag != other.tag:
+            return (self.tag or "") > (other.tag or "")
         return self.intervals > other.intervals
 
     def __ge__(self, other):
         if other.sid != self.sid:
             return self.sid >= other.sid
+        if self.tag != other.tag:
+            return (self.tag or "") >= (other.tag or "")
         return self.intervals >= other.intervals
 
 

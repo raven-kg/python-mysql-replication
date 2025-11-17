@@ -306,6 +306,32 @@ class BinLogStreamReader(object):
             self._ctl_connection.close()
             self.__connected_ctl = False
 
+    def __get_server_version(self):
+        """
+        Get MySQL server version as a tuple (major, minor, patch).
+        Returns: tuple like (8, 4, 0) or (5, 7, 44)
+        """
+        cur = self._stream_connection.cursor()
+        cur.execute("SELECT VERSION()")
+        version_str = cur.fetchone()[0]
+        cur.close()
+        # Parse version string like "8.4.0" or "5.7.44-log"
+        # Remove any suffix like "-log", "-MariaDB" etc
+        version_parts = version_str.split('-')[0].split('.')
+        try:
+            return tuple(int(x) for x in version_parts[:3])
+        except (ValueError, IndexError):
+        # Fallback for unexpected formats
+            return (0, 0, 0)
+
+    def __get_binlog_status_query(self):
+        """Returns the appropriate query based on MySQL version."""
+        # TODO: perhaps it's better using self.is_mariadb here
+        if (8, 4, 0) <= self.mysql_version < (10, 0, 0):
+            return "SHOW BINARY LOG STATUS"
+        else:
+            return "SHOW MASTER STATUS"
+
     def __connect_to_ctl(self):
         if not self._ctl_connection_settings:
             self._ctl_connection_settings = dict(self.__connection_settings)
@@ -352,6 +378,11 @@ class BinLogStreamReader(object):
         # server_id (4) -- server id of this slave
         # log_file (string.EOF) -- filename of the binlog on the master
         self._stream_connection = self.pymysql_wrapper(**self.__connection_settings)
+
+        # Get MySQL version first - needed for correct queries
+        self.mysql_version = self.__get_server_version()
+        if self.__enable_logging:
+            logging.info(f"Connected to MySQL version: {'.'.join(map(str, self.mysql_version))}")
 
         self.__use_checksum = self.__checksum_enabled()
 
@@ -401,8 +432,11 @@ class BinLogStreamReader(object):
                 # only when log_file and log_pos both provided, the position info is
                 # valid, if not, get the current position from master
                 if self.log_file is None or self.log_pos is None:
+                    # Use version-appropriate query
+                    status_query = self.__get_binlog_status_query()
+
                     cur = self._stream_connection.cursor()
-                    cur.execute("SHOW MASTER STATUS")
+                    cur.execute(status_query)
                     master_status = cur.fetchone()
                     if master_status is None:
                         raise BinLogNotEnabled()
